@@ -15,6 +15,8 @@ class PlayerController:
         self.wall_mask = None
         self.future_apples_deque = None
         self.distance_map = None
+        self.pairwise_distances_precomputed = False;
+
 
     def bid(self, board:player_board.PlayerBoard, time_left:Callable):
         self.board_width = board.get_dim_x() # num of cols 
@@ -27,9 +29,29 @@ class PlayerController:
         future_apples.sort(key=lambda x: x[0]) #sort future apples according to time
         self.future_apples_deque = deque(future_apples)
 
+        return 0 #return value for bid length
 
-        #precompute distance between any 2 pair of points on the board
 
+    def play(self, board:player_board.PlayerBoard, time_left:Callable):
+        if not self.pairwise_distances_precomputed: 
+            self.precompute_pairwise_distances(board)
+
+        possible_moves = board.get_possible_directions()
+        final_moves = []
+        for move in possible_moves:
+            if(board.is_valid_move(move)):
+                final_moves.append(move)
+
+        final_move = random.choice(final_moves)
+
+        final_turn = [final_move]
+
+        if(len(final_turn) > 0):
+            return final_turn
+        return Action.FF
+    
+    
+    def precompute_pairwise_distances(self, board: player_board.PlayerBoard): 
         self.distance_map = {} # (start_x, start_y) -> {(target_x, target_y): distance}
         directions = {(-1, 0), (1, 0), (0, 1), (0, -1), (-1, -1), (1, 1), (-1, 1), (1, -1)}
 
@@ -71,21 +93,3 @@ class PlayerController:
                             queue.append((nx, ny, dist + 1))
 
                 self.distance_map[start] = distances
-
-        return 0 #return value for bid length
-
-
-    def play(self, board:player_board.PlayerBoard, time_left:Callable):
-        possible_moves = board.get_possible_directions()
-        final_moves = []
-        for move in possible_moves:
-            if(board.is_valid_move(move)):
-                final_moves.append(move)
-
-        final_move = random.choice(final_moves)
-
-        final_turn = [final_move]
-
-        if(len(final_turn) > 0):
-            return final_turn
-        return Action.FF
