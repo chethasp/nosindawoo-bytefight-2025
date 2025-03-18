@@ -37,6 +37,11 @@ class PlayerController:
         if remaining_time < 0.1:
             return [Action.FF]
 
+        # Update future apples
+        current_turn = board.get_turn_count()
+        while self.future_apples_deque and self.future_apples_deque[0][0] < current_turn:
+            self.future_apples_deque.popleft()
+
         current_apples = board.get_current_apples()
         head = tuple(board.get_head_location())
         closest_apple = self.find_closest_apple(head, current_apples)
@@ -61,35 +66,66 @@ class PlayerController:
                 closest_apple = (ax, ay)
         return closest_apple
 
-    def evaluate(self, board: player_board.PlayerBoard, closest_apple: tuple) -> float:
-        """Score: High for eating, strong proximity reward."""
+    def evaluate(self, board: player_board.PlayerBoard, closest_apple: tuple, maximizing: bool) -> float:
+        """Score: High for eating, proximity reward, future apples, polynomial-scaled penalty for occupied spaces."""
         valid_moves = self.get_valid_moves(board)
         if not valid_moves:
             return float('-inf')
 
         head = tuple(board.get_head_location())
         apples = board.get_current_apples()
+        current_turn = board.get_turn_count()
 
         ate_apple = np.any(np.all(apples == head, axis=1)) if apples.size > 0 else False
         if ate_apple:
             return 10000.0
 
-        if closest_apple is None:
-            return 0.0
+        score = 0.0
+        if closest_apple is not None:
+            ax, ay = closest_apple
+            dist = self.distance_map[head][ay][ax]
+            if dist is not None:
+                score = 10000.0 / (dist + 1) - dist
+        elif self.future_apples_deque:  # No current apples, consider future
+            min_future_dist = float('inf')
+            for spawn_turn, ax, ay in self.future_apples_deque:
+                dist = self.distance_map[head][ay][ax]
+                if dist is not None and spawn_turn + 2 <= current_turn + dist:
+                    if dist < min_future_dist:
+                        min_future_dist = dist
+                        score = 10000.0 / (dist + 1) - dist * 0.5
+                if dist is not None and spawn_turn > current_turn + dist:
+                    break
 
-        ax, ay = closest_apple
-        dist = self.distance_map[head][ay][ax]
-        if dist is None:
-            return 0.0
-        # Stronger reward for proximity, penalize distance
-        score = 10000.0 / (dist + 1) - dist  # E.g., dist 1 → 4999, dist 10 → 999.9
-        print(f"Eval - Head: {head}, Dist to {closest_apple}: {dist}, Score: {score}")
+        # Custom calculation of free spaces in 5x5 area (2 steps including diagonals)
+        free_spaces = 0
+        head_x, head_y = head
+        my_body = [tuple(loc) for loc in board.get_all_locations(enemy=False)]
+        enemy_body = [tuple(loc) for loc in board.get_all_locations(enemy=True)]
+        for x in range(max(0, head_x - 2), min(self.board_width, head_x + 3)):
+            for y in range(max(0, head_y - 2), min(self.board_height, head_y + 3)):
+                if (x, y) != head:  # Exclude the head itself
+                    # Check if cell is occupied (wall, my body, or enemy body)
+                    if (self.wall_mask[y, x] == 0 and  # Not a wall
+                        (x, y) not in my_body and  # Not my body
+                        (x, y) not in enemy_body and  # Not enemy body
+                        (self.portal_mask[y, x][0] == -1 or self.portal_mask[y, x][1] == -1)):  # Not a portal
+                        free_spaces += 1
+
+        max_possible_spaces = 24  # 5x5 area around head (25 cells total, minus head)
+        # Polynomial scaling: penalty = max_penalty * (1 - free_spaces/max_spaces)^2
+        proximity_ratio = free_spaces / max_possible_spaces
+        max_penalty = 10000.0
+        proximity_penalty = max_penalty * (1 - proximity_ratio) ** 2
+
+        score -= proximity_penalty
+
         return score
 
     def minimax(self, board: player_board.PlayerBoard, depth: int, maximizing: bool, 
                 closest_apple: tuple, alpha: float = float('-inf'), beta: float = float('inf')) -> tuple[float, Action | None]:
         if depth == 0:
-            return self.evaluate(board, closest_apple), None
+            return self.evaluate(board, closest_apple, maximizing), None
 
         valid_moves = self.get_valid_moves(board)
         if not valid_moves:
