@@ -33,24 +33,12 @@ class PlayerController:
         if not self.pairwise_distances_precomputed:
             self.precompute_pairwise_distances(board)
 
-        remaining_time = self.time_left()
-        if remaining_time < 0.1:
-            return [Action.FF]
+        self.head_location = tuple(board.get_head_location())
 
-        # Update future apples
-        current_turn = board.get_turn_count()
-        while self.future_apples_deque and self.future_apples_deque[0][0] < current_turn:
-            self.future_apples_deque.popleft()
+        score, best_move = self.minimax_alphabeta(board, self.max_depth, True)
 
-        current_apples = board.get_current_apples()
-        head = tuple(board.get_head_location())
-        closest_apple = self.find_closest_apple(head, current_apples)
-
-        print(f"Head: {head}, Closest Apple: {closest_apple}, Apples: {current_apples.tolist()}")
-        score, best_move = self.minimax(board, self.max_depth, True, closest_apple=closest_apple)
-        print(f"Best Move: {best_move}, Score: {score}")
         if best_move is None:
-            valid_moves = self.get_valid_moves(board)
+            valid_moves = [move for move in board.get_possible_directions() if board.is_valid_move(move)] 
             return [valid_moves[0]] if valid_moves else [Action.FF]
         return [best_move]
 
@@ -65,98 +53,198 @@ class PlayerController:
                 min_dist = dist
                 closest_apple = (ax, ay)
         return closest_apple
-
-    def evaluate(self, board: player_board.PlayerBoard, closest_apple: tuple, maximizing: bool) -> float:
-        """Score: High for eating, proximity reward, future apples, polynomial-scaled penalty for occupied spaces."""
-        valid_moves = self.get_valid_moves(board)
-        if not valid_moves:
-            return float('-inf')
-
+    
+    def evaluate(self, board: player_board.PlayerBoard, own_turn: bool) -> float: 
+        if own_turn: 
+            valid_moves = [move for move in board.get_possible_directions() if board.is_valid_move(move)] 
+            if len(valid_moves) == 0: 
+                return float('-inf') #us having no moves left on our own turn is very bad
+        
+        else: #enemy turn
+            valid_moves = [move for move in board.get_possible_directions(enemy = True) if board.is_valid_move(move, enemy=True)] 
+            if len(valid_moves) == 0: 
+                return float('inf') #enemy having no moves left on their turn is very good
+            
         head = tuple(board.get_head_location())
-        apples = board.get_current_apples()
+        enemy_head = tuple(board.get_head_location(True))
+
+        current_apples = board.get_current_apples()
         current_turn = board.get_turn_count()
 
-        ate_apple = np.any(np.all(apples == head, axis=1)) if apples.size > 0 else False
-        if ate_apple:
-            return 10000.0
-
         score = 0.0
-        if closest_apple is not None:
-            ax, ay = closest_apple
-            dist = self.distance_map[head][ay][ax]
-            if dist is not None:
-                score = 10000.0 / (dist + 1) - dist
-        elif self.future_apples_deque:  # No current apples, consider future
-            min_future_dist = float('inf')
-            for spawn_turn, ax, ay in self.future_apples_deque:
+        apple_proximity = 0.0
+        proximity_penalty = 0.0
+
+        #Assign a score of 10000 for eating an apple
+        if(own_turn): 
+            score = 10000 * board.get_apples_eaten()
+
+            closest_apple = self.find_closest_apple(head, current_apples)
+
+            if closest_apple is not None:
+                ax, ay = closest_apple
                 dist = self.distance_map[head][ay][ax]
-                if dist is not None and spawn_turn + 2 <= current_turn + dist:
-                    if dist < min_future_dist:
-                        min_future_dist = dist
-                        score = 10000.0 / (dist + 1) - dist * 0.5
-                if dist is not None and spawn_turn > current_turn + dist:
-                    break
+                if dist is not None:
+                    apple_proximity += 10000.0 / (dist + 1) - dist
+            elif self.future_apples_deque:  # No current apples, consider future
+                min_future_dist = float('inf')
+                for spawn_turn, ax, ay in self.future_apples_deque:
+                    dist = self.distance_map[head][ay][ax]
+                    if dist is not None and spawn_turn + 2 <= current_turn + dist:
+                        if dist < min_future_dist:
+                            min_future_dist = dist
+                            apple_proximity += 10000.0 / (dist + 1) - dist * 0.5
+                    if dist is not None and spawn_turn > current_turn + dist:
+                        break
 
-        # Custom calculation of free spaces in 5x5 area (2 steps including diagonals)
-        free_spaces = 0
-        head_x, head_y = head
-        my_body = [tuple(loc) for loc in board.get_all_locations(enemy=False)]
-        enemy_body = [tuple(loc) for loc in board.get_all_locations(enemy=True)]
-        for x in range(max(0, head_x - 2), min(self.board_width, head_x + 3)):
-            for y in range(max(0, head_y - 2), min(self.board_height, head_y + 3)):
-                if (x, y) != head:  # Exclude the head itself
-                    # Check if cell is occupied (wall, my body, or enemy body)
-                    if (self.wall_mask[y, x] == 0 and  # Not a wall
-                        (x, y) not in my_body and  # Not my body
-                        (x, y) not in enemy_body and  # Not enemy body
-                        (self.portal_mask[y, x][0] == -1 or self.portal_mask[y, x][1] == -1)):  # Not a portal
-                        free_spaces += 1
+            
+                    # Custom calculation of free spaces in 5x5 area (2 steps including diagonals)
+            free_spaces = 0
+            head_x, head_y = head
+            my_body = [tuple(loc) for loc in board.get_all_locations(enemy=False)]
+            enemy_body = [tuple(loc) for loc in board.get_all_locations(enemy=True)]
+            for x in range(max(0, head_x - 2), min(self.board_width, head_x + 3)):
+                for y in range(max(0, head_y - 2), min(self.board_height, head_y + 3)):
+                    if (x, y) != head:  # Exclude the head itself
+                        # Check if cell is occupied (wall, my body, or enemy body)
+                        if (self.wall_mask[y, x] == 0 and  # Not a wall
+                            (x, y) not in my_body and  # Not my body
+                            (x, y) not in enemy_body and  # Not enemy body
+                            (self.portal_mask[y, x][0] == -1 or self.portal_mask[y, x][1] == -1)):  # Not a portal
+                            free_spaces += 1
 
-        max_possible_spaces = 24  # 5x5 area around head (25 cells total, minus head)
-        # Polynomial scaling: penalty = max_penalty * (1 - free_spaces/max_spaces)^2
-        proximity_ratio = free_spaces / max_possible_spaces
-        max_penalty = 10000.0
-        proximity_penalty = max_penalty * (1 - proximity_ratio) ** 2
+            max_possible_spaces = 24  # 5x5 area around head (25 cells total, minus head)
+            # Polynomial scaling: penalty = max_penalty * (1 - free_spaces/max_spaces)^2
+            proximity_ratio = free_spaces / max_possible_spaces
+            max_penalty = 10000.0
+            proximity_penalty = max_penalty * (1 - proximity_ratio) ** 2
+        
+        else: 
+            ate_apple = np.any(np.all(current_apples == enemy_head, axis=1)) if current_apples.size > 0 else False
+            if ate_apple:
+                return -10000.0 * board.get_apples_eaten(False)
+
+            closest_apple = self.find_closest_apple(enemy_head, current_apples)
+
+            if closest_apple is not None:
+                ax, ay = closest_apple
+                dist = self.distance_map[enemy_head][ay][ax]
+                if dist is not None:
+                    apple_proximity += -10000.0 / (dist + 1) - dist
+            elif self.future_apples_deque:  # No current apples, consider future
+                min_future_dist = float('inf')
+                for spawn_turn, ax, ay in self.future_apples_deque:
+                    dist = self.distance_map[enemy_head][ay][ax]
+                    if dist is not None and spawn_turn + 2 <= current_turn + dist:
+                        if dist < min_future_dist:
+                            min_future_dist = dist
+                            apple_proximity += -10000.0 / (dist + 1) - dist * 0.5
+                    if dist is not None and spawn_turn > current_turn + dist:
+                        break
+            
+            free_spaces = 0
+            head_x, head_y = enemy_head
+            my_body = [tuple(loc) for loc in board.get_all_locations(enemy=True)]
+            enemy_body = [tuple(loc) for loc in board.get_all_locations(enemy=False)]
+            for x in range(max(0, head_x - 2), min(self.board_width, head_x + 3)):
+                for y in range(max(0, head_y - 2), min(self.board_height, head_y + 3)):
+                    if (x, y) != head:  # Exclude the head itself
+                        # Check if cell is occupied (wall, my body, or enemy body)
+                        if (self.wall_mask[y, x] == 0 and  # Not a wall
+                            (x, y) not in enemy_body and  # Not my body
+                            (x, y) not in my_body and  # Not enemy body
+                            (self.portal_mask[y, x][0] == -1 or self.portal_mask[y, x][1] == -1)):  # Not a portal
+                            free_spaces += 1
+
+            max_possible_spaces = 24  # 5x5 area around head (25 cells total, minus head)
+            # Polynomial scaling: penalty = max_penalty * (1 - free_spaces/max_spaces)^2
+            proximity_ratio = free_spaces / max_possible_spaces
+            max_penalty = 10000.0
+            proximity_penalty = max_penalty * (1 - proximity_ratio) ** 2
+
+
+        # # Custom calculation of free spaces in 5x5 area (2 steps including diagonals)
+        # free_spaces = 0
+        # head_x, head_y = head
+        # my_body = [tuple(loc) for loc in board.get_all_locations(enemy=False)]
+        # enemy_body = [tuple(loc) for loc in board.get_all_locations(enemy=True)]
+        # for x in range(max(0, head_x - 2), min(self.board_width, head_x + 3)):
+        #     for y in range(max(0, head_y - 2), min(self.board_height, head_y + 3)):
+        #         if (x, y) != head:  # Exclude the head itself
+        #             # Check if cell is occupied (wall, my body, or enemy body)
+        #             if (self.wall_mask[y, x] == 0 and  # Not a wall
+        #                 (x, y) not in my_body and  # Not my body
+        #                 (x, y) not in enemy_body and  # Not enemy body
+        #                 (self.portal_mask[y, x][0] == -1 or self.portal_mask[y, x][1] == -1)):  # Not a portal
+        #                 free_spaces += 1
+
+        # max_possible_spaces = 24  # 5x5 area around head (25 cells total, minus head)
+        # # Polynomial scaling: penalty = max_penalty * (1 - free_spaces/max_spaces)^2
+        # proximity_ratio = free_spaces / max_possible_spaces
+        # max_penalty = 10000.0
+        # proximity_penalty = max_penalty * (1 - proximity_ratio) ** 2
 
         score -= proximity_penalty
 
+
+        # Free space calculation
+        #GROK IDEA AND CODE
+        # head_x, head_y = head if own_turn else enemy_head
+        # my_body = [tuple(loc) for loc in board.get_all_locations(enemy=False)]
+        # enemy_body = [tuple(loc) for loc in board.get_all_locations(enemy=True)]
+        # free_spaces = 0
+        # for x in range(max(0, head_x - 2), min(self.board_width, head_x + 3)):
+        #     for y in range(max(0, head_y - 2), min(self.board_height, head_y + 3)):
+        #         if (x, y) != (head_x, head_y):
+        #             if (self.wall_mask[y, x] == 0 and
+        #                 (x, y) not in my_body and
+        #                 (x, y) not in enemy_body and
+        #                 (self.portal_mask[y, x][0] == -1 or self.portal_mask[y, x][1] == -1)):
+        #                 free_spaces += 1
+        # proximity_ratio = free_spaces / 24
+        # max_penalty = 20000.0
+        # proximity_penalty = max_penalty * (1 - proximity_ratio) ** 2
+        # score += proximity_penalty if own_turn else -proximity_penalty
+
         return score
+    
 
-    def minimax(self, board: player_board.PlayerBoard, depth: int, maximizing: bool, 
-                closest_apple: tuple, alpha: float = float('-inf'), beta: float = float('inf')) -> tuple[float, Action | None]:
+    def minimax_alphabeta(self, board: player_board.PlayerBoard, depth: int, maximizing: bool, alpha: float = float('-inf'), beta: float = float('inf')) -> tuple[float, Action | None]:
         if depth == 0:
-            return self.evaluate(board, closest_apple, maximizing), None
-
-        valid_moves = self.get_valid_moves(board)
+            return self.evaluate(board, maximizing), None
+        
+        valid_moves = None
+        if(maximizing): #it's our turn
+            valid_moves = [move for move in board.get_possible_directions() if board.is_valid_move(move)] 
+        else: 
+            valid_moves = [move for move in board.get_possible_directions(enemy = True) if board.is_valid_move(move, enemy=True)] 
+        
         if not valid_moves:
             return float('-inf') if maximizing else float('inf'), None
+        best_move = None 
 
-        best_move = None
-        if maximizing:
+        if maximizing: 
             max_eval = float('-inf')
-            for move in valid_moves:
-                next_board, success = board.forecast_action(move)
-                if not success:
-                    continue
-                if board.is_my_turn():
-                    next_board.end_turn(reverse=True)
-                eval_score, _ = self.minimax(next_board, depth - 1, False, closest_apple, alpha, beta)
-                if eval_score > max_eval:
-                    max_eval = eval_score
-                    best_move = move
+            for move in valid_moves: 
+                next_board, success = board.forecast_turn([move])
+                if not success: 
+                    print("ERORR: Tried applying invalid move")
+                eval_score, _ = self.minimax_alphabeta(next_board, depth - 1, False, alpha, beta)
+                if eval_score > max_eval: 
+                    max_eval = eval_score 
+                    best_move = move 
                 alpha = max(alpha, eval_score)
-                if beta <= alpha:
+                if beta <= alpha: 
                     break
             return max_eval, best_move
-        else:
+
+        else: #minimizing
             min_eval = float('inf')
-            for move in valid_moves:
-                next_board, success = board.forecast_action(move)
-                if not success:
-                    continue
-                if board.is_enemy_turn():
-                    next_board.end_turn(reverse=True)
-                eval_score, _ = self.minimax(next_board, depth - 1, True, closest_apple, alpha, beta)
+            for move in valid_moves: 
+                next_board, success = board.forecast_turn([move])
+                if not success: 
+                    print("ERORR: Tried applying invalid move")
+                eval_score, _ = self.minimax_alphabeta(next_board, depth - 1, True, alpha, beta)
                 if eval_score < min_eval:
                     min_eval = eval_score
                     best_move = move
@@ -165,8 +253,6 @@ class PlayerController:
                     break
             return min_eval, best_move
 
-    def get_valid_moves(self, board: player_board.PlayerBoard) -> list[Action]:
-        return [move for move in board.get_possible_directions() if board.is_valid_move(move)]
 
     def precompute_pairwise_distances(self, board: player_board.PlayerBoard): 
         self.distance_map = {}
